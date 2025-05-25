@@ -4,6 +4,7 @@ from database import db
 from modules.vehicle_management import Vehicle, FuelRecord, MaintenanceRecord
 from modules.dispatch import Task
 from modules.monitoring import FuelConsumption
+from modules.modeling import predict_failure_probability
 
 class Analytics:
     @staticmethod
@@ -104,4 +105,45 @@ class Analytics:
             'last_maintenance': last_maintenance.date,
             'predicted_next_maintenance': next_maintenance,
             'days_until_maintenance': (next_maintenance - datetime.now()).days
-        } 
+        }
+
+    @staticmethod
+    def calculate_fuel_consumption_per_100km(vehicle_id, start_date, end_date):
+        """Расчёт среднего расхода топлива на 100 км по данным о заправках"""
+        # Получаем все заправки по ТС за период, отсортированные по дате
+        fuel_records = FuelRecord.query.filter(
+            FuelRecord.vehicle_id == vehicle_id,
+            FuelRecord.date.between(start_date, end_date)
+        ).order_by(FuelRecord.date).all()
+        if len(fuel_records) < 2:
+            return None  # Недостаточно данных
+        total_fuel = 0.0
+        total_distance = 0.0
+        prev_mileage = None
+        for rec in fuel_records:
+            if rec.mileage is not None:
+                if prev_mileage is not None and rec.mileage > prev_mileage:
+                    total_distance += rec.mileage - prev_mileage
+                prev_mileage = rec.mileage
+            if rec.amount is not None:
+                total_fuel += rec.amount
+        if total_distance == 0:
+            return None  # Нет данных о пробеге
+        avg_consumption = (total_fuel / total_distance) * 100
+        return {
+            'total_fuel': total_fuel,
+            'total_distance': total_distance,
+            'avg_consumption_per_100km': avg_consumption
+        }
+
+    @staticmethod
+    def failure_probability(vehicle_id, horizon_days=30):
+        """Вероятность поломки ТС в течение horizon_days на основе истории ТО"""
+        maintenance_dates = db.session.query(MaintenanceRecord.date).filter(
+            MaintenanceRecord.vehicle_id == vehicle_id
+        ).order_by(MaintenanceRecord.date).all()
+        maintenance_dates = [d[0] for d in maintenance_dates if d[0] is not None]
+        if len(maintenance_dates) < 2:
+            return None
+        prob = predict_failure_probability(maintenance_dates, horizon_days=horizon_days)
+        return prob 

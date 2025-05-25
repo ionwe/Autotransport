@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QDate, QTimer, QPoint
 from database import db, app as flask_app
-from modules.vehicle_management import Vehicle, MaintenanceRecord, SparePart, FuelRecord, OwnershipHistory
+from modules.vehicle_management import Vehicle, MaintenanceRecord, SparePart, FuelRecord, OwnershipHistory, User
 from modules.dispatch import Driver, Route
 from modules.monitoring import TrackingData
 from modules.analytics import Analytics
@@ -17,6 +17,10 @@ from PyQt6.QtWebEngineWidgets import QWebEngineView
 import json
 import random
 import requests
+import bcrypt
+import matplotlib.pyplot as plt
+from matplotlib.dates import DateFormatter
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 
 CITY_COORDS = {
     "Москва": (55.7558, 37.6176),
@@ -214,10 +218,16 @@ class AnalyticsWidget(QWidget):
         self.btn_eff = QPushButton('Эффективность использования')
         self.btn_report = QPushButton('Отчет по топливу')
         self.btn_forecast = QPushButton('Прогноз ТО')
+        self.btn_fuel_avg = QPushButton('Средний расход топлива (л/100км)')
+        self.btn_failure_prob = QPushButton('Вероятность поломки (30 дней)')
+        self.btn_fuel_plot = QPushButton('График расхода топлива')
         btn_layout.addWidget(self.btn_cost)
         btn_layout.addWidget(self.btn_eff)
         btn_layout.addWidget(self.btn_report)
         btn_layout.addWidget(self.btn_forecast)
+        btn_layout.addWidget(self.btn_fuel_avg)
+        btn_layout.addWidget(self.btn_failure_prob)
+        btn_layout.addWidget(self.btn_fuel_plot)
         layout.addLayout(btn_layout)
        
         self.result = QTextEdit()
@@ -228,6 +238,9 @@ class AnalyticsWidget(QWidget):
         self.btn_eff.clicked.connect(self.show_efficiency)
         self.btn_report.clicked.connect(self.show_report)
         self.btn_forecast.clicked.connect(self.show_forecast)
+        self.btn_fuel_avg.clicked.connect(self.show_fuel_avg)
+        self.btn_failure_prob.clicked.connect(self.show_failure_prob)
+        self.btn_fuel_plot.clicked.connect(self.show_fuel_plot)
 
     def refresh_vehicles(self):
         self.vehicle_box.clear()
@@ -275,6 +288,63 @@ class AnalyticsWidget(QWidget):
             self.result.setText(f"Последнее ТО: {res['last_maintenance']}\nСледующее ТО: {res['predicted_next_maintenance']}\nДней до ТО: {res['days_until_maintenance']}")
         else:
             self.result.setText("Нет данных для прогноза.")
+
+    def show_fuel_avg(self):
+        vid = self.get_selected_vehicle_id()
+        start, end = self.get_dates()
+        with flask_app.app_context():
+            res = Analytics.calculate_fuel_consumption_per_100km(vid, start, end)
+        if res:
+            self.result.setText(f"Средний расход топлива: {res['avg_consumption_per_100km']:.2f} л/100км\nОбщий пробег: {res['total_distance']:.1f} км\nИзрасходовано топлива: {res['total_fuel']:.1f} л")
+        else:
+            self.result.setText('Недостаточно данных для расчёта расхода топлива!')
+
+    def show_failure_prob(self):
+        vid = self.get_selected_vehicle_id()
+        with flask_app.app_context():
+            prob = Analytics.failure_probability(vid, horizon_days=30)
+        if prob is not None:
+            self.result.setText(f"Вероятность поломки в ближайшие 30 дней: {prob*100:.1f}%")
+        else:
+            self.result.setText('Недостаточно данных для оценки вероятности поломки!')
+
+    def show_fuel_plot(self):
+        vid = self.get_selected_vehicle_id()
+        with flask_app.app_context():
+            records = FuelRecord.query.filter(
+                FuelRecord.vehicle_id == vid
+            ).order_by(FuelRecord.date).all()
+        if len(records) < 2:
+            self.result.setText('Недостаточно данных для построения графика!')
+            return
+        dates = []
+        consumptions = []
+        prev_mileage = None
+        prev_date = None
+        prev_amount = None
+        for rec in records:
+            if rec.mileage is not None and rec.amount is not None:
+                if prev_mileage is not None and rec.mileage > prev_mileage:
+                    distance = rec.mileage - prev_mileage
+                    if distance > 0:
+                        consumption = (prev_amount / distance) * 100
+                        dates.append(rec.date)
+                        consumptions.append(consumption)
+                prev_mileage = rec.mileage
+                prev_date = rec.date
+                prev_amount = rec.amount
+        if not dates:
+            self.result.setText('Недостаточно данных для построения графика!')
+            return
+        fig, ax = plt.subplots()
+        ax.plot(dates, consumptions, marker='o', linestyle='-')
+        ax.set_title('Расход топлива (л/100км)')
+        ax.set_xlabel('Дата')
+        ax.set_ylabel('Расход (л/100км)')
+        ax.xaxis.set_major_formatter(DateFormatter('%Y-%m-%d'))
+        fig.autofmt_xdate()
+        plt.tight_layout()
+        plt.show()
 
 class MapSimulationWidget(QWidget):
     def refresh_vehicles_and_routes(self):
@@ -748,6 +818,23 @@ class DraggableTabBar(QTabBar):
         self._last_pos = None
         super().mouseReleaseEvent(event)
 
+class LoginDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Авторизация')
+        self.setFixedSize(300, 150)
+        layout = QFormLayout(self)
+        self.username_edit = QLineEdit()
+        self.password_edit = QLineEdit()
+        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addRow('Логин:', self.username_edit)
+        layout.addRow('Пароль:', self.password_edit)
+        self.btn_login = QPushButton('Войти')
+        self.btn_login.clicked.connect(self.accept)
+        layout.addRow(self.btn_login)
+    def get_credentials(self):
+        return self.username_edit.text(), self.password_edit.text()
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -777,7 +864,19 @@ class MainWindow(QMainWindow):
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-
+    login = LoginDialog()
+    while True:
+        if login.exec() == QDialog.DialogCode.Accepted:
+            username, password = login.get_credentials()
+            with flask_app.app_context():
+                user = User.query.filter_by(username=username).first()
+                if user and bcrypt.checkpw(password.encode('utf-8'), user.password_hash.encode('utf-8')):
+                    break
+                else:
+                    QMessageBox.warning(None, 'Ошибка', 'Неверный логин или пароль!')
+        else:
+            sys.exit()
+            
     app.setStyleSheet('''
         QMainWindow {
             background: #1e1e1e;
@@ -880,7 +979,6 @@ if __name__ == '__main__':
             width: 20px;
         }
         QComboBox::down-arrow {
-            image: url(down_arrow.png);
             width: 12px;
             height: 12px;
         }
@@ -966,6 +1064,7 @@ if __name__ == '__main__':
             color: #ffffff;
         }
     ''')
-    window = MainWindow()
-    window.show()
+    # --- Запуск основного окна ---
+    main_win = MainWindow()
+    main_win.show()
     sys.exit(app.exec()) 

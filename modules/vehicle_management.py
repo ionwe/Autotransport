@@ -66,4 +66,14 @@ class OwnershipHistory(db.Model):
     documents = Column(String)
 
     def __repr__(self):
-        return f'<OwnershipHistory {self.owner_name} for {self.vehicle_id}>' 
+        return f'<OwnershipHistory {self.owner_name} for {self.vehicle_id}>'
+
+
+class User(db.Model):
+    __tablename__ = 'users'
+    id = Column(Integer, primary_key=True)
+    username = Column(String(150), unique=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+
+    def __repr__(self):
+        return f'<User {self.username}>' 
